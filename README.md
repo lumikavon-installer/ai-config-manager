@@ -33,7 +33,7 @@ cargo build --locked --release -p ai-config-cli
 
 `cargo test` 默认只运行核心与 CLI，不要求 GUI 库；桌面原生测试可用 `cargo test --locked -p ai-config-manager`，需要上面的原生依赖。`scripts/verify.sh` / `scripts/verify.ps1` 顺序执行基础验证。安装包位于 `target/release/bundle`，CLI 为 `target/release/ai-config-manager-cli`（Windows 为 `.exe`）；源码构建也保留 `ai-config` 兼容命令。Windows MSI 和 NSIS 需要管理员权限，将 CLI 安装到系统目录；Linux deb/rpm 将 CLI 安装到 `/usr/local/bin`。AppImage 是免安装程序，其 CLI 位于包内，独立 CLI 归档可从 Release 下载并手动安装；macOS app/DMG 同样不修改系统 PATH。Windows NSIS 安装包会先显示安装语言选择（简体中文/English），中文系统默认中文；MSI 固定使用 `zh-CN`。安装后的显示名称为 **AI配置管理器**，桌面可执行文件为 `ai-config-manager.exe`。Windows 安装包在 Windows 原生环境生成。不要把跨平台 `cargo check` 当成安装或桌面运行通过。
 
-推送与项目版本一致的 `v*` 标签会触发 `.github/workflows/release.yml`：先执行前端与 Rust 验证，再在 Windows、macOS（Apple silicon）和 Linux 上构建安装包及独立 CLI，并自动发布为 GitHub Release。构建产物未签名。
+推送与项目版本一致的 `v*` 标签会触发 `.github/workflows/release.yml`：先执行前端与 Rust 验证，再在 Windows、macOS（Apple silicon）和 Linux 上构建安装包及独立 CLI，并自动发布为 GitHub Release。工作流修复后也可使用 `gh workflow run release.yml -f tag=v0.2.0` 重建已有标签，不移动标签。构建产物未签名。
 
 仓库提交 `Cargo.lock` 与 `package-lock.json`，构建使用锁文件。CI 配置提供三个 OS 的原生编译检查，但配置存在不代表 CI 已执行。实际验证记录见 [验收记录](docs/acceptance.md)。签名证书、API Key 和开发者身份均不随源码提供；未签名的安装包可能被系统提示来源未验证。
 

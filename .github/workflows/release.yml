@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -12,13 +18,19 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: npm
       - name: Verify release tag matches package version
-        run: node scripts/check-version.mjs
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          node scripts/check-version.mjs
+          node -e 'if (process.env.RELEASE_TAG !== `v${require("./package.json").version}`) process.exit(1)'
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
           components: rustfmt
@@ -41,14 +53,16 @@ jobs:
         include:
           - os: windows-2022
             bundles: msi,nsis
-          - os: macos-14
+          - os: macos-15
             bundles: app,dmg
           - os: ubuntu-24.04
             bundles: deb,appimage
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: npm
@@ -67,8 +81,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "AI配置管理器 ${{ github.ref_name }}"
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "AI配置管理器 ${{ inputs.tag || github.ref_name }}"
           releaseBody: |
             Desktop builds for Windows, macOS (Apple silicon) and Linux.
 
@@ -90,13 +104,14 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           exe=ai-config-manager-cli
           if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
           "./target/release/$exe" --help
           archive="ai-config-manager-cli-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz"
           tar -czf "$archive" -C target/release "$exe"
-          gh release upload "$GITHUB_REF_NAME" "$archive"
+          gh release upload "$RELEASE_TAG" "$archive" --clobber
 
   finalize:
     needs: publish
@@ -108,4 +123,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false
