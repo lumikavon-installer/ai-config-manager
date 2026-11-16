@@ -1,9 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import TitleBar from "./TitleBar";
+import SettingsSection from "./SettingsSection";
+import SyncPanels, { EMPTY_APPLICATION, policyDraftOf, repositoryCode, type ApplicationDraft, type PolicyDraft, type SyncTab } from "./SyncPanels";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { messages } from "./i18n";
-import type { ConfigView, Settings, HistoryEntry, Language } from "./types";
+import type {
+  ConfigView,
+  CreateRepositoryResult,
+  EndpointKind,
+  Settings,
+  HistoryEntry,
+  Language,
+  ProbeResult,
+  RepositoryProbeResult,
+  SyncItem,
+  SyncApplicationRequest,
+  SyncPolicy,
+  SyncProvider,
+  SyncRecord,
+  SyncView,
+} from "./types";
 import "./styles.css";
 const empty: ConfigView = {
   exists: false,
@@ -12,8 +29,19 @@ const empty: ConfigView = {
   key_present: false,
   encrypted: true,
   revision: "missing",
+  endpoint: "openai",
+  configured: false,
 };
-type Page = "config" | "history" | "settings";
+const ENDPOINTS: EndpointKind[] = ["openai", "embedding", "laya", "cosyvoice"];
+const ENDPOINT_DEFAULTS: Partial<Record<EndpointKind, { base_url: string; model: string }>> = {
+  embedding: { base_url: "http://127.0.0.1:8848/v1", model: "" },
+  laya: { base_url: "http://127.0.0.1:8848/v1", model: "laya-multilingual" },
+  cosyvoice: { base_url: "http://127.0.0.1:8848/v1", model: "cosyvoice3-0.5b-2512" },
+};
+type Page = "config" | "history" | "sync" | "applications" | "sync_history" | "settings";
+type SettingsTab = "general" | "target" | "automation" | "about";
+const SETTINGS_TABS: SettingsTab[] = ["general", "target", "automation", "about"];
+const workspacePage = (page: Page) => page !== "config" && page !== "history";
 function safeEditorView(value: ConfigView): ConfigView {
   return value.key_present ? value : { ...value, encrypted: true };
 }
@@ -90,15 +118,34 @@ function normalizeHistory(value: unknown): HistoryEntry[] {
 export default function App() {
   const [page, setPage] = useState<Page>("config"),
     [language, setLanguage] = useState<Language>("zh");
+  const [endpoint, setEndpoint] = useState<EndpointKind>("openai");
   const [config, setConfig] = useState<ConfigView | null>(null),
     [draft, setDraft] = useState(empty),
-    [key, setKey] = useState("");
+    [key, setKey] = useState(""),
+    [probe, setProbe] = useState<ProbeResult | null>(null);
   // True when the file changed under an unsaved, conflicting draft. Saving would
   // overwrite an external edit the user has not seen, so reload/discard is required.
   const [configStale, setConfigStale] = useState(false);
   const saveRef = useRef<HTMLButtonElement>(null);
   const [settings, setSettings] = useState<Settings | null>(null),
-    [settingsBase, setSettingsBase] = useState<Settings | null>(null);
+    [settingsBase, setSettingsBase] = useState<Settings | null>(null),
+    [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [sync, setSync] = useState<SyncView | null>(null),
+    [syncProvider, setSyncProvider] = useState<SyncProvider>("github"),
+    [syncBranch, setSyncBranch] = useState("main"),
+    [syncRepo, setSyncRepo] = useState(""),
+    [syncToken, setSyncToken] = useState(""),
+    [syncPassword, setSyncPassword] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [repositoryProbe, setRepositoryProbe] = useState<RepositoryProbeResult | null>(null);
+  const [repositoryTesting, setRepositoryTesting] = useState(false);
+  const [repositoryCreating, setRepositoryCreating] = useState(false);
+  const repositoryProbeVersion = useRef(0);
+  const [applicationDraft, setApplicationDraft] = useState<ApplicationDraft>(EMPTY_APPLICATION);
+  // Null follows the saved baseline; an edited form is independent of refreshes.
+  const [policyDraft, setPolicyDraft] = useState<PolicyDraft | null>(null);
+  const [recordsBusy, setRecordsBusy] = useState(false);
+  const recordsLoading = useRef(false);
   const [configSaving, setConfigSaving] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false),
     [settingsUncertain, setSettingsUncertain] = useState(false);
@@ -154,8 +201,40 @@ export default function App() {
     (settings.silent_start !== settingsBase.silent_start ||
       settings.close_to_tray !== settingsBase.close_to_tray ||
       settings.language !== settingsBase.language);
-  const dirty = configDirty || settingsDirty;
-  const uiBusy = busy || settingsBusy;
+  const syncSettingsDirty =
+    !!sync && (syncRepo.trim() !== sync.repo || syncProvider !== (sync.provider ?? "github") ||
+      syncBranch.trim() !== (sync.git_branch ?? "main") || !!syncToken || !!syncPassword);
+  const applicationDirty = Object.keys(EMPTY_APPLICATION).some((field) =>
+    applicationDraft[field as keyof ApplicationDraft] !== EMPTY_APPLICATION[field as keyof ApplicationDraft]);
+  const policyBase = policyDraftOf(sync?.policy);
+  const policy = policyDraft ?? policyBase;
+  const policyDirty = policy.auto_sync_enabled !== policyBase.auto_sync_enabled ||
+    policy.sync_interval_minutes !== policyBase.sync_interval_minutes ||
+    policy.history_retention_days !== policyBase.history_retention_days;
+  const dirty = configDirty || settingsDirty || syncSettingsDirty || applicationDirty || policyDirty;
+  const uiBusy = busy || settingsBusy || syncBusy;
+  // The agent-change listener is installed once. These refs let it read the
+  // newest baseline/dirty state without re-subscribing or capturing a stale draft.
+  const configRef = useRef<ConfigView | null>(null);
+  const configDirtyRef = useRef(false);
+  const syncSettingsDirtyRef = useRef(false);
+  const languageRef = useRef<Language>(language);
+  const endpointRef = useRef<EndpointKind>(endpoint);
+  useEffect(() => {
+    endpointRef.current = endpoint;
+  }, [endpoint]);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+  useEffect(() => {
+    configDirtyRef.current = configDirty;
+  }, [configDirty]);
+  useEffect(() => {
+    syncSettingsDirtyRef.current = syncSettingsDirty;
+  }, [syncSettingsDirty]);
+  useEffect(() => {
+    languageRef.current = language;
+  }, [language]);
   function notice(message: string, error = false) {
     setStatus(message);
     setFailed(error);
@@ -174,6 +253,50 @@ export default function App() {
       invalid_config: t.invalidError,
       tray_unavailable: t.trayWarning,
       tray_menu: t.settingsTraySync,
+      sync_busy: t.syncBusy,
+      sync_not_configured: t.syncNotConfigured,
+      sync_disabled: t.syncDisabled,
+      sync_repo: t.syncRepoInvalid,
+      sync_token: t.syncTokenInvalid,
+      sync_password: t.syncPasswordInvalid,
+      sync_path: t.syncPathRequired,
+      sync_file_too_large: t.syncFileTooLarge,
+      sync_duplicate: t.syncDuplicate,
+      sync_item_missing: t.syncItemMissing,
+      sync_required: t.syncRequired,
+      sync_vault: t.syncVaultError,
+      sync_config: t.syncConfigInvalid,
+      sync_policy: t.syncPolicyInvalid,
+      sync_application: t.applicationInvalid,
+      sync_application_id: t.applicationInvalid,
+      sync_application_interface: t.applicationInvalid,
+      sync_application_network: t.applicationFailed,
+      sync_application_offline: t.syncApplicationOffline,
+      sync_application_timeout: t.applicationFailed,
+      sync_application_response: t.applicationFailed,
+      sync_application_conflict: t.conflictError,
+      sync_registration: t.applicationInvalid,
+      sync_interface: t.applicationInvalid,
+      sync_callback: t.applicationFailed,
+      sync_local_changed: t.conflictError,
+      github_auth: t.syncGithubAuth,
+      github_forbidden: t.syncGithubForbidden,
+      github_repo_not_found: t.syncGithubNotFound,
+      github_conflict: t.syncGithubConflict,
+      github_rejected: t.syncGithubRejected,
+      github_server: t.syncGithubServer,
+      github_network: t.syncGithubNetwork,
+      github_timeout: t.syncGithubTimeout,
+      github_rate_limit: t.syncGithubRateLimit,
+      git_unavailable: t.gitUnavailable,
+      git_repo: t.gitRepoInvalid,
+      git_branch: t.gitBranchInvalid,
+      git_read: t.gitReadFailed,
+      git_write: t.gitWriteFailed,
+      git_conflict: t.gitConflict,
+      git_timeout: t.gitTimeout,
+      git_cleanup: t.gitCleanupFailed,
+      git_failed: t.gitFailed,
     };
     if (specific[code]) return specific[code];
     return code === "commit_uncertain"
@@ -194,36 +317,312 @@ export default function App() {
                     ? t.conflictError
                     : t.error;
   }
+  function applySync(
+    value: SyncView | null,
+    updateRepo = true,
+    clearSecrets = true,
+  ) {
+    clearRepositoryProbe();
+    setSync(value);
+    if (value && updateRepo) {
+      setSyncRepo(value.repo);
+      setSyncProvider(value.provider ?? "github");
+      setSyncBranch(value.git_branch ?? "main");
+    }
+    if (clearSecrets) {
+      setSyncToken("");
+      setSyncPassword("");
+    }
+  }
+  function clearRepositoryProbe() {
+    repositoryProbeVersion.current += 1;
+    setRepositoryProbe(null);
+  }
+  function editTarget<T,>(setter: (value: T) => void, value: T) {
+    clearRepositoryProbe();
+    setter(value);
+  }
   function restore() {
     if (config) setDraft(config);
     setKey("");
+    setProbe(null);
     setConfigStale(false);
     if (settingsBase) {
       setSettings(settingsBase);
       setLanguage(settingsBase.language);
     }
+    setSyncRepo(sync?.repo ?? "");
+    setSyncProvider(sync?.provider ?? "github");
+    setSyncBranch(sync?.git_branch ?? "main");
+    clearRepositoryProbe();
+    setSyncToken("");
+    setSyncPassword("");
+    setApplicationDraft(EMPTY_APPLICATION);
+    setPolicyDraft(null);
   }
+  async function refreshSync() {
+    if (uiBusy || confirmationPending.current) return;
+    if (syncSettingsDirty && !(await confirm(t.dirtyPrompt))) return;
+    setSyncBusy(true);
+    try {
+      applySync(await invoke<SyncView>("sync_read"));
+      notice("");
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function saveSyncSettings() {
+    if (!sync || uiBusy) return;
+    setSyncBusy(true);
+    notice(t.saving);
+    try {
+      const value = await invoke<SyncView>("sync_save_settings", {
+        provider: syncProvider,
+        gitBranch: syncBranch.trim() || "main",
+        repo: syncRepo.trim(),
+        githubToken: syncProvider === "github" ? syncToken.trim() || null : null,
+        encryptionSecret: syncPassword || null,
+      });
+      applySync(value);
+      notice(t.syncSaved);
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function testRepository() {
+    if (uiBusy || !syncRepo.trim()) return;
+    clearRepositoryProbe();
+    const version = repositoryProbeVersion.current;
+    setRepositoryTesting(true);
+    setSyncBusy(true);
+    try {
+      const result = await invoke<RepositoryProbeResult>("sync_test_repository", { request: {
+        provider: syncProvider, repo: syncRepo.trim(), git_branch: syncBranch.trim() || "main",
+        github_token: syncProvider === "github" ? syncToken.trim() || null : null,
+      } });
+      if (version === repositoryProbeVersion.current) setRepositoryProbe(result);
+    } catch (error) {
+      if (version === repositoryProbeVersion.current) setRepositoryProbe({
+        ok: false, readable: false, writable: false, cleanup_ok: false,
+        code: repositoryCode(codeOf(error).toUpperCase()), latency_ms: 0, probe_ref: null,
+      });
+    } finally {
+      setRepositoryTesting(false);
+      setSyncBusy(false);
+    }
+  }
+  async function createRepository() {
+    if (uiBusy || syncProvider !== "github" || !syncRepo.trim()) return;
+    setRepositoryCreating(true);
+    setSyncBusy(true);
+    try {
+      const result = await invoke<CreateRepositoryResult>("sync_create_repository", {
+        request: { repo: syncRepo.trim(), github_token: syncToken.trim() || null },
+      });
+      clearRepositoryProbe();
+      setSyncRepo(result.repo);
+      notice(`${t.githubRepositoryCreated} · ${result.repo}`);
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setRepositoryCreating(false);
+      setSyncBusy(false);
+    }
+  }
+  async function removeSyncItem(item: SyncItem) {
+    if (uiBusy) return;
+    setSyncBusy(true);
+    try {
+      applySync(
+        await invoke<SyncView>("sync_remove_item", { id: item.id }),
+        false,
+        false,
+      );
+      notice(t.syncRemoved);
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function toggleSyncItem(item: SyncItem, enabled: boolean) {
+    if (uiBusy) return;
+    setSyncBusy(true);
+    try {
+      applySync(
+        await invoke<SyncView>("sync_set_item_enabled", {
+          id: item.id,
+          enabled,
+        }),
+        false,
+        false,
+      );
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function toggleApplicationAutoSync(item: SyncItem, enabled: boolean) {
+    if (uiBusy || !item.application) return;
+    setSyncBusy(true);
+    try {
+      applySync(await invoke<SyncView>("sync_set_application_auto_sync", {
+        appId: item.application.app_id, enabled,
+      }), false, false);
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function runSync(appId?: string) {
+    if (!sync || uiBusy || syncSettingsDirty || sync.running || !sync.items.some((item) => item.kind === "application" && item.enabled)) return;
+    setSyncBusy(true);
+    notice(t.syncing);
+    try {
+      const value = appId
+        ? await invoke<SyncView>("sync_run_application", { appId })
+        : await invoke<SyncView>("sync_run");
+      applySync(value, false, false);
+      const record = value.records?.[0];
+      const failed =
+        value.status.state !== "success" ||
+        (appId !== undefined && record?.app_id === appId && record.state === "error");
+      notice(failed ? t.syncFailed : t.syncSuccess, failed);
+    } catch (error) {
+      notice(errorText(error), true);
+      try {
+        applySync(await invoke<SyncView>("sync_read"), false, false);
+      } catch {
+        // Keep the error above; status will refresh on the next read.
+      }
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function registerApplication(): Promise<string | null> {
+    if (!sync || uiBusy) return t.syncBusy;
+    const values = Object.fromEntries(Object.entries(applicationDraft).map(([name, value]) => [name, value.trim()])) as ApplicationDraft;
+    const absoluteSocket = /^(\/|[a-z]:[\\/])/.test(values.socket_path.toLowerCase());
+    if (Object.values(values).some(isBlank) || !absoluteSocket || !values.path.startsWith("/") ||
+        values.path.startsWith("//") || /[\s?#]/.test(values.path)) {
+      return t.applicationRequired;
+    }
+    const request: SyncApplicationRequest = {
+      app_id: values.app_id, app_name: values.app_name, config_id: values.config_id,
+      label: values.label, sync_interface: { socket_path: values.socket_path, path: values.path }, enabled: true,
+    };
+    setSyncBusy(true);
+    try {
+      applySync(await invoke<SyncView>("sync_register_application", { request }), false, false);
+      setApplicationDraft(EMPTY_APPLICATION);
+      notice(t.applicationSaved);
+      return null;
+    } catch (error) {
+      return errorText(error);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function saveSyncPolicy() {
+    if (!sync || uiBusy) return;
+    const interval = Number(policy.sync_interval_minutes);
+    const retention = Number(policy.history_retention_days);
+    if (!policy.sync_interval_minutes.trim() || !policy.history_retention_days.trim() ||
+        !Number.isInteger(interval) || interval < 1 || interval > 1440 ||
+        !Number.isInteger(retention) || retention < 0 || retention > 3650) {
+      notice(t.syncPolicyInvalid, true);
+      return;
+    }
+    const value: SyncPolicy = { auto_sync_enabled: policy.auto_sync_enabled, sync_interval_minutes: interval, history_retention_days: retention };
+    setSyncBusy(true);
+    try {
+      applySync(await invoke<SyncView>("sync_save_policy", { policy: value }), false, false);
+      setPolicyDraft(null);
+      notice(t.syncPolicySaved);
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function cleanupSyncHistory() {
+    if (!sync || uiBusy) return;
+    setSyncBusy(true);
+    try {
+      applySync(await invoke<SyncView>("sync_cleanup"), false, false);
+      notice(t.syncHistoryCleaned);
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+  async function loadSyncRecords(announce = true) {
+    if (recordsLoading.current) return;
+    recordsLoading.current = true;
+    setRecordsBusy(true);
+    try {
+      const records = await invoke<SyncRecord[]>("sync_history");
+      setSync((current) => current ? { ...current, records: records.slice(0, 100) } : current);
+      if (announce) notice(t.syncRecordsLoaded);
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      recordsLoading.current = false;
+      setRecordsBusy(false);
+    }
+  }
+  useEffect(() => {
+    if (supported && page === "sync_history" && sync)
+      void loadSyncRecords(false);
+  }, [supported, page, settingsTab]);
   async function navigate(next: Page) {
     if (next === page || uiBusy || historyBusy || confirmationPending.current) return;
-    if (dirty && !(await confirm(t.dirtyPrompt))) return;
-    restore();
+    if (!(workspacePage(page) && workspacePage(next))) {
+      if (dirty && !(await confirm(t.dirtyPrompt))) return;
+      restore();
+    }
     setPage(next);
     notice("");
     if (next === "history") void loadHistory();
   }
-  async function loadConfig() {
+  function readConfig(kind: EndpointKind = endpoint) {
+    return kind === "openai"
+      ? invoke<ConfigView>("config_read")
+      : invoke<ConfigView>("endpoint_read", { kind });
+  }
+  async function loadConfig(kind: EndpointKind = endpoint) {
     setBusy(true);
     setKey("");
     notice(t.loading);
     try {
-      const loaded = await invoke<ConfigView>("config_read");
+      const loaded = await readConfig(kind);
       const value = loaded.key_present
         ? loaded
         : { ...loaded, encrypted: true };
+      const configured = value.configured ?? value.exists;
       setConfig(value);
-      setDraft(value);
+      const defaults = ENDPOINT_DEFAULTS[kind];
+      setDraft(
+        defaults && !configured
+          ? {
+              ...value,
+              base_url: value.base_url || defaults.base_url,
+              model: value.model || defaults.model,
+            }
+          : value,
+      );
       setKey("");
-      notice(value.exists ? "" : t.empty);
+      setProbe(null);
+      notice(
+        configured ? "" : kind === "openai" ? t.empty : t.endpointEmpty,
+      );
       setConfigStale(false);
     } catch (error) {
       // Nothing is known about the file any more: never present the previous
@@ -231,6 +630,7 @@ export default function App() {
       setConfig(null);
       setDraft(empty);
       setKey("");
+      setProbe(null);
       setConfigStale(false);
       notice(`${errorText(error)} ${t.loadFailure}`, true);
     } finally {
@@ -250,6 +650,7 @@ export default function App() {
       setSettings(value);
       setSettingsBase(value);
       setLanguage(value.language);
+      applySync(value.sync ?? null);
       setSettingsUncertain(false);
       // Clear the progress notice once the read the user asked for has settled.
       if (clearStatus) notice("");
@@ -289,6 +690,7 @@ export default function App() {
   }, []);
   useEffect(() => {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+    document.title = messages[language].brand;
   }, [language]);
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
@@ -326,6 +728,75 @@ export default function App() {
       unlisten?.();
     };
   }, [supported]);
+  useEffect(() => {
+    if (!supported) return;
+    let stopped = false;
+    let unlisten: (() => void) | undefined;
+    try {
+      void listen("sync-changed", () => {
+        void invoke<SyncView>("sync_read").then((value) => {
+          if (stopped) return;
+          applySync(value, !syncSettingsDirtyRef.current, false);
+        }).catch(() => {});
+      }).then((fn) => {
+        if (stopped) fn();
+        else unlisten = fn;
+      }).catch(() => {});
+    } catch {
+      /* no event channel available */
+    }
+    return () => {
+      stopped = true;
+      unlisten?.();
+    };
+  }, [supported]);
+  useEffect(() => {
+    if (!supported) return;
+    let stopped = false;
+    let unlisten: (() => void) | undefined;
+    try {
+      void listen<string>("config-changed", () => {
+        void (async () => {
+          if (stopped) return;
+          try {
+            const kind = endpointRef.current;
+            const actual = safeEditorView(await readConfig(kind));
+            if (actual.revision === configRef.current?.revision) return;
+            const copy = messages[languageRef.current];
+            if (configDirtyRef.current) {
+              // Keep the draft, but make the conflict explicit: saving against
+              // the old revision must not overwrite the agent's committed change.
+              setConfig(actual);
+              setConfigStale(true);
+              setProbe(null);
+              notice(copy.externalChange, true);
+            } else {
+              setConfig(actual);
+              setDraft(actual);
+              setKey("");
+              setProbe(null);
+              setConfigStale(false);
+              notice(copy.externalReloaded);
+            }
+          } catch {
+            // A failed reconciliation does not invalidate the current editor;
+            // the next explicit reload reports the problem.
+          }
+        })();
+      })
+        .then((fn) => {
+          if (stopped) fn();
+          else unlisten = fn;
+        })
+        .catch(() => {});
+    } catch {
+      /* no event channel available */
+    }
+    return () => {
+      stopped = true;
+      unlisten?.();
+    };
+  }, [supported]);
   async function save(event: React.FormEvent) {
     event.preventDefault();
     if (!config || uiBusy || configStale) return;
@@ -335,7 +806,7 @@ export default function App() {
     if (
       isBlank(draft.base_url) ||
       isBlank(draft.model) ||
-      (!config.key_present && isBlank(secret))
+      (endpoint === "openai" && !config.key_present && isBlank(secret))
     ) {
       notice(t.required, true);
       return;
@@ -358,18 +829,31 @@ export default function App() {
     setConfigSaving(true);
     notice(t.saving);
     try {
-      const value = await invoke<ConfigView>("config_save", {
-        request: {
-          base_url: draft.base_url.trim(),
-          model: draft.model.trim(),
-          api_key: secret || null,
-          encrypt: draft.encrypted,
-          expected_revision: config.revision,
-        },
-      });
+      const value =
+        endpoint === "openai"
+          ? await invoke<ConfigView>("config_save", {
+              request: {
+                base_url: draft.base_url.trim(),
+                model: draft.model.trim(),
+                api_key: secret || null,
+                encrypt: draft.encrypted,
+                expected_revision: config.revision,
+              },
+            })
+          : await invoke<ConfigView>("endpoint_save", {
+              kind: endpoint,
+              request: {
+                base_url: draft.base_url.trim(),
+                model: draft.model.trim(),
+                api_key: secret || null,
+                encrypt: draft.encrypted,
+                expected_revision: config.revision,
+              },
+            });
       setConfig(value);
       setDraft(value);
       setKey("");
+      setProbe(null);
       notice(t.saved);
     } catch (error) {
       const code = codeOf(error);
@@ -379,7 +863,7 @@ export default function App() {
         notice(t.historyPending, true);
         try {
           const actual = safeEditorView(
-            await invoke<ConfigView>("config_read"),
+            await readConfig(),
           );
           setConfig(actual);
           setDraft(actual);
@@ -393,7 +877,7 @@ export default function App() {
         notice(errorText(error), true);
         try {
           const actual = safeEditorView(
-            await invoke<ConfigView>("config_read"),
+            await readConfig(),
           );
           if (actual.revision !== config.revision) {
             setKey("");
@@ -414,7 +898,7 @@ export default function App() {
         notice(errorText(error), true);
         try {
           const actual = safeEditorView(
-            await invoke<ConfigView>("config_read"),
+            await readConfig(),
           );
           setConfig(actual);
           setConfigStale(actual.revision !== config.revision);
@@ -429,12 +913,50 @@ export default function App() {
     }
   }
   async function check() {
-    if (uiBusy || configStale || !config?.key_present) return;
+    if (uiBusy || configStale || endpoint !== "openai" || !config?.key_present) return;
     setBusy(true);
     notice(t.checking);
     try {
       await invoke("config_check");
       notice(t.checked);
+    } catch (error) {
+      notice(errorText(error), true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function testConnection() {
+    if (uiBusy || configDirty || configStale || (endpoint === "openai" && !config?.key_present)) return;
+    setBusy(true);
+    setProbe(null);
+    notice(t.testing);
+    try {
+      const result =
+        endpoint === "openai"
+          ? await invoke<ProbeResult>("config_test")
+          : await invoke<ProbeResult>("endpoint_test", { kind: endpoint });
+      setProbe(result);
+      const message =
+        result.code === "ok" && result.status !== null
+          ? t.testOk(result.status, result.latency_ms)
+          : result.code === "unauthorized"
+            ? t.testUnauthorized
+            : result.code === "endpoint_unsupported"
+              ? t.testEndpointUnsupported
+              : result.code === "redirect"
+                ? t.testRedirect
+                : result.code === "timeout"
+                  ? t.testTimeout
+                  : result.code === "network"
+                    ? t.testNetwork
+                    : result.code === "client"
+                      ? t.testClient
+                      : result.code === "server_error" && result.status !== null
+                      ? t.testServerError(result.status)
+                      : result.status !== null
+                        ? t.testRejected(result.status)
+                        : t.testNetwork;
+      notice(message, !result.ok);
     } catch (error) {
       notice(errorText(error), true);
     } finally {
@@ -456,6 +978,7 @@ export default function App() {
       setSettings(value);
       setSettingsBase(value);
       setLanguage(value.language);
+      applySync(value.sync ?? sync, false, false);
       setSettingsUncertain(false);
       const durabilityUncertain = value.warnings?.some((warning) =>
         warning.startsWith("SETTINGS_DURABILITY_UNCERTAIN"),
@@ -585,6 +1108,34 @@ export default function App() {
     if (configDirty && !(await confirm(t.dirtyPrompt))) return;
     void loadConfig();
   }
+  function settingsTabLabel(tab: SettingsTab) {
+    return { general: t.settingsGeneral, target: t.syncTargetGroup,
+      automation: t.settingsAutomation, about: t.settingsAbout }[tab];
+  }
+  function onSettingsTabKeyDown(
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? SETTINGS_TABS.length - 1
+          : event.key === "ArrowRight"
+            ? (index + 1) % SETTINGS_TABS.length
+            : (index - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    const next = SETTINGS_TABS[nextIndex];
+    setSettingsTab(next);
+    document.getElementById(`settings-tab-${next}`)?.focus();
+  }
+  function syncWarningText(warning: string) {
+    if (warning.startsWith("SYNC_CONFIG")) return t.syncConfigInvalid;
+    if (warning.startsWith("SYNC_VAULT")) return t.syncVaultError;
+    if (warning.startsWith("SYNC_STATUS_SAVE")) return t.syncStatusSave;
+    return t.syncWarnings;
+  }
   function historyValue(field: string, value: string | null) {
     // `[EMPTY]` is the backend's "there was no value" sentinel for every field, and
     // `[VALUE EXCEEDS LIMIT]` means the old value was too large to journal.
@@ -594,7 +1145,12 @@ export default function App() {
     }
     if (value === null || value === "" || value === "[EMPTY]") return t.removed;
     if (value === "[VALUE EXCEEDS LIMIT]") return t.tooLongValue;
-    if (field === "encrypted") return value === "true" ? t.on : t.off;
+    if (field === "encrypted" || field.endsWith(".encrypted")) {
+      return value === "true" ? t.on : t.off;
+    }
+    if (field === "configured" || field.endsWith(".configured")) {
+      return value === "true" ? t.on : t.off;
+    }
     return scrubValue(value);
   }
   /// Contract fields are protocol tokens; the history card shows user-facing names.
@@ -604,8 +1160,51 @@ export default function App() {
       model: t.fieldModel,
       encrypted: t.fieldEncrypted,
       api_key: t.fieldKey,
+      configured: t.fieldConfigured,
     };
-    return labels[field] ?? field;
+    const separator = field.indexOf(".");
+    if (separator < 0) return labels[field] ?? field;
+    const kind = field.slice(0, separator);
+    const name = field.slice(separator + 1);
+    return `${endpointLabel(kind)} · ${labels[name] ?? name}`;
+  }
+  function endpointLabel(kind: string) {
+    const labels: Record<string, string> = {
+      openai: t.endpointOpenai,
+      embedding: t.endpointEmbedding,
+      laya: t.endpointLaya,
+      cosyvoice: t.endpointCosyvoice,
+    };
+    return labels[kind] ?? kind;
+  }
+  async function changeEndpoint(next: EndpointKind) {
+    if (next === endpoint || uiBusy) return;
+    if (configDirty && !(await confirm(t.dirtyPrompt))) return;
+    setEndpoint(next);
+    setConfig(null);
+    setDraft(empty);
+    setKey("");
+    setProbe(null);
+    setConfigStale(false);
+    void loadConfig(next);
+  }
+  function onEndpointTabKeyDown(
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? ENDPOINTS.length - 1
+          : event.key === "ArrowRight"
+            ? (index + 1) % ENDPOINTS.length
+            : (index - 1 + ENDPOINTS.length) % ENDPOINTS.length;
+    const next = ENDPOINTS[nextIndex];
+    document.getElementById(`endpoint-tab-${next}`)?.focus();
+    void changeEndpoint(next);
   }
   const toggle = (
     label: string,
@@ -634,14 +1233,32 @@ export default function App() {
     setStatus(messages[language].windowError);
     setFailed(true);
   }, [language]);
+  const syncPanel = (tab: SyncTab) => <SyncPanels tab={tab} language={language} sync={sync} busy={uiBusy}
+    provider={syncProvider} gitBranch={syncBranch}
+    onProvider={(value) => editTarget(setSyncProvider, value)} onGitBranch={(value) => editTarget(setSyncBranch, value)}
+    repositoryProbe={repositoryProbe} repositoryTesting={repositoryTesting} onTestRepository={() => void testRepository()}
+    repositoryCreating={repositoryCreating} onCreateRepository={() => void createRepository()}
+    repo={syncRepo} token={syncToken} encryptionSecret={syncPassword}
+    targetDirty={syncSettingsDirty}
+    onRepo={(value) => editTarget(setSyncRepo, value)} onToken={(value) => editTarget(setSyncToken, value)}
+    onPassword={(value) => editTarget(setSyncPassword, value)}
+    onSaveTarget={() => void saveSyncSettings()} onRefresh={() => void refreshSync()}
+    onRun={(appId) => void runSync(appId)}
+    onAutoSync={(item, enabled) => void toggleApplicationAutoSync(item, enabled)}
+    onToggle={(item, enabled) => void toggleSyncItem(item, enabled)} onRemove={(item) => void removeSyncItem(item)} warningText={syncWarningText}
+    application={applicationDraft} applicationDirty={applicationDirty} onApplication={setApplicationDraft} onRegister={registerApplication}
+    policy={policy} policyDirty={policyDirty} onPolicy={setPolicyDraft}
+    onSavePolicy={() => void saveSyncPolicy()} onCleanup={() => void cleanupSyncHistory()}
+    recordsBusy={recordsBusy} onRefreshRecords={() => void loadSyncRecords()} />;
   async function closeWindow() {
     if (dirty && !(await confirm(t.dirtyPrompt))) return;
+    if (dirty) restore();
     void invoke("window_control", { action: "close" }).catch(windowError);
   }
   if (!supported)
     return (
       <main className="unsupported">
-        <div className="logo">◈</div>
+        <div className="logo" aria-hidden="true">A</div>
         <h1>{t.unsupported}</h1>
         <p>{t.unsupportedHelp}</p>
       </main>
@@ -650,17 +1267,8 @@ export default function App() {
     <div className="app">
       <TitleBar language={language} onClose={() => void closeWindow()} onError={windowError} />
       <aside>
-        <div className="branding">
-          <div className="logo" aria-hidden="true">
-            ◈
-          </div>
-          <div>
-            <strong>{t.brand}</strong>
-            <small>{t.tagline}</small>
-          </div>
-        </div>
         <nav aria-label={t.brand}>
-          {(["config", "history", "settings"] as Page[]).map((p, index) => (
+          {(["config", "history", "sync", "applications", "sync_history", "settings"] as Page[]).map((p, index) => (
             <button
               key={p}
               className={page === p ? "active" : ""}
@@ -668,7 +1276,7 @@ export default function App() {
               onClick={() => navigate(p)}
               disabled={uiBusy || historyBusy}
             >
-              <span aria-hidden="true">{["⚙", "↺", "☷"][index]}</span>
+              <span aria-hidden="true">{["⚙", "↺", "⇄", "▦", "◷", "☷"][index]}</span>
               {t[p]}
             </button>
           ))}
@@ -687,14 +1295,14 @@ export default function App() {
               ? t.configTitle
               : page === "history"
                 ? t.historyTitle
-                : t.settingsTitle}
+                : page === "settings" ? t.settingsTitle : t[page]}
           </h1>
           <p>
             {page === "config"
               ? t.configIntro
               : page === "history"
                 ? t.historyIntro
-                : t.settingsIntro}
+                : page === "sync" ? t.syncIntro : page === "applications" ? t.applicationsIntro : page === "sync_history" ? t.syncRecordsIntro : t.settingsIntro}
           </p>
         </header>
         <div
@@ -708,7 +1316,9 @@ export default function App() {
           <>
             <section className="card">
               <div className="card-top">
-                <h2>{t.config}</h2>
+                <h2>
+                  {t.config} · {endpointLabel(endpoint)}
+                </h2>
                 {config && (
                   <span className={`badge ${!draft.encrypted ? "warning" : ""}`}>
                     {configStale || configDirty
@@ -717,9 +1327,39 @@ export default function App() {
                         ? draft.encrypted
                           ? t.protected
                           : t.plaintext
-                        : t.noKey}
+                        : endpoint === "openai"
+                          ? t.noKey
+                          : t.endpointNoKey}
                   </span>
                 )}
+              </div>
+              <div className="endpoint-picker">
+                <span className="endpoint-picker-label" id="endpoint-kind-label">
+                  {t.endpointKind}
+                </span>
+                <div
+                  className="tabs endpoint-tabs"
+                  role="tablist"
+                  aria-labelledby="endpoint-kind-label"
+                >
+                  {ENDPOINTS.map((kind, index) => (
+                    <button
+                      key={kind}
+                      id={`endpoint-tab-${kind}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={endpoint === kind}
+                      tabIndex={endpoint === kind ? 0 : -1}
+                      className={endpoint === kind ? "active" : ""}
+                      disabled={uiBusy}
+                      onClick={() => void changeEndpoint(kind)}
+                      onKeyDown={(event) => onEndpointTabKeyDown(event, index)}
+                    >
+                      {endpointLabel(kind)}
+                    </button>
+                  ))}
+                </div>
+                <small>{t.endpointKindHelp}</small>
               </div>
               {/* The app owns URL validation (`save()` reports t.urlInvalid through the
                   live region). Native `type=url` constraint validation would otherwise
@@ -738,7 +1378,9 @@ export default function App() {
                     autoComplete="off"
                     spellCheck={false}
                   />
-                  <small id="base-help">{t.baseHelp}</small>
+                  <small id="base-help">
+                    {endpoint === "openai" ? t.baseHelp : t.endpointBaseHelp}
+                  </small>
                   <label htmlFor="api-key">{t.key}</label>
                   <input
                     id="api-key"
@@ -750,7 +1392,11 @@ export default function App() {
                     spellCheck={false}
                   />
                   <small id="key-help">
-                    {config?.key_present ? t.keySaved : t.keyNew}
+                    {endpoint === "openai"
+                      ? config?.key_present
+                        ? t.keySaved
+                        : t.keyNew
+                      : t.endpointKeyHelp}
                   </small>
                   <label htmlFor="model">{t.model}</label>
                   <input
@@ -762,6 +1408,7 @@ export default function App() {
                     aria-describedby="model-help"
                     autoComplete="off"
                     spellCheck={false}
+                    placeholder={ENDPOINT_DEFAULTS[endpoint]?.model ?? ""}
                   />
                   <small id="model-help">{t.modelHelp}</small>
                   {toggle(
@@ -803,14 +1450,39 @@ export default function App() {
                   >
                     {t.cancel}
                   </button>
+                  {endpoint === "openai" && (
+                    <button
+                      type="button"
+                      onClick={() => void check()}
+                      disabled={uiBusy || !config?.key_present || configStale}
+                    >
+                      {t.check}
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => void check()}
-                    disabled={uiBusy || !config?.key_present || configStale}
+                    onClick={() => void testConnection()}
+                    disabled={
+                      uiBusy ||
+                      configDirty ||
+                      configStale ||
+                      (endpoint === "openai" && !config?.key_present)
+                    }
+                    title={t.testSavedOnly}
                   >
-                    {t.check}
+                    {t.testConnection}
                   </button>
                 </div>
+                {probe && (
+                  <p
+                    className={`probe-result ${probe.ok ? "" : "error"}`}
+                    role="status"
+                  >
+                    <span>{probe.endpoint}</span>
+                    {probe.status !== null && <span>HTTP {probe.status}</span>}
+                    <span>{probe.latency_ms} ms</span>
+                  </p>
+                )}
               </form>
             </section>
             <section className="note">
@@ -883,6 +1555,7 @@ export default function App() {
             </ul>
           </section>
         )}
+        {(page === "sync" || page === "applications" || page === "sync_history") && syncPanel(page)}
         {page === "settings" && (
           <>
             {settingsError ? (
@@ -896,6 +1569,31 @@ export default function App() {
               <p role="status">{t.loading}</p>
             ) : (
               <>
+                <div className="tabs" role="tablist" aria-label={t.settingsTabs}>
+                  {SETTINGS_TABS.map((tab, index) => (
+                    <button
+                      key={tab}
+                      id={`settings-tab-${tab}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={settingsTab === tab}
+                      aria-controls={`settings-panel-${tab}`}
+                      tabIndex={settingsTab === tab ? 0 : -1}
+                      className={settingsTab === tab ? "active" : ""}
+                      onClick={() => setSettingsTab(tab)}
+                      onKeyDown={(event) => onSettingsTabKeyDown(event, index)}
+                    >
+                      {settingsTabLabel(tab)}
+                    </button>
+                  ))}
+                </div>
+                <div
+                  id="settings-panel-general"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-general"
+                  className="tab-panel"
+                  hidden={settingsTab !== "general"}
+                >
                 <section className="card settings-card" aria-label={t.settings}>
                   <div className="card-top">
                     <h2>{t.settings}</h2>
@@ -906,53 +1604,71 @@ export default function App() {
                       {t.settingsUncertain}
                     </p>
                   )}
-                  <label htmlFor="language">{t.language}</label>
-                  <select
-                    id="language"
-                    value={settings.language}
-                    disabled={uiBusy}
-                    onChange={(e) => {
-                      const value = e.target.value as Language;
-                      setSettings({ ...settings, language: value });
-                      setLanguage(value);
-                      // Keep the reason Save is disabled; only clear a resolved notice.
-                      if (!settingsUncertain) notice("");
-                    }}
+                  <SettingsSection
+                    title={t.settingsPreferencesGroup}
+                    summary={settings.language === "zh" ? t.chinese : t.english}
+                    defaultOpen
                   >
-                    <option value="zh">{t.chinese}</option>
-                    <option value="en">{t.english}</option>
-                  </select>
-                  {toggle(
-                    t.silent,
-                    t.silentHelp,
-                    settings.silent_start,
-                    (value) => {
-                      setSettings({ ...settings, silent_start: value });
-                      // A new edit makes any previous "saved" confirmation stale.
-                      if (!settingsUncertain) notice("");
-                    },
-                    !settings.tray_available,
-                  )}
-                  {toggle(
-                    t.tray,
-                    t.trayHelp,
-                    settings.close_to_tray,
-                    (value) => {
-                      setSettings({ ...settings, close_to_tray: value });
-                      if (!settingsUncertain) notice("");
-                    },
-                    !settings.tray_available,
-                  )}
-                  {toggle(
-                    t.auto,
-                    settings.autostart_known === false ? t.unknown : t.autoHelp,
-                    settings.autostart,
-                    (value) => void toggleAuto(value),
-                    // An unconfirmed OS state must not read as a definite "off" switch,
-                    // but the switch stays usable so the user can set it explicitly.
-                    false,
-                    settings.autostart_known === false,
-                  )}
+                    <label htmlFor="language">{t.language}</label>
+                    <select
+                      id="language"
+                      value={settings.language}
+                      disabled={uiBusy}
+                      onChange={(e) => {
+                        const value = e.target.value as Language;
+                        setSettings({ ...settings, language: value });
+                        setLanguage(value);
+                        // Keep the reason Save is disabled; only clear a resolved notice.
+                        if (!settingsUncertain) notice("");
+                      }}
+                    >
+                      <option value="zh">{t.chinese}</option>
+                      <option value="en">{t.english}</option>
+                    </select>
+                    {toggle(
+                      t.silent,
+                      t.silentHelp,
+                      settings.silent_start,
+                      (value) => {
+                        setSettings({ ...settings, silent_start: value });
+                        // A new edit makes any previous "saved" confirmation stale.
+                        if (!settingsUncertain) notice("");
+                      },
+                      !settings.tray_available,
+                    )}
+                    {toggle(
+                      t.tray,
+                      t.trayHelp,
+                      settings.close_to_tray,
+                      (value) => {
+                        setSettings({ ...settings, close_to_tray: value });
+                        if (!settingsUncertain) notice("");
+                      },
+                      !settings.tray_available,
+                    )}
+                  </SettingsSection>
+                  <SettingsSection
+                    title={t.settingsSystemGroup}
+                    summary={
+                      settings.autostart_known === false
+                        ? "?"
+                        : settings.autostart
+                          ? t.on
+                          : t.off
+                    }
+                    defaultOpen
+                  >
+                    {toggle(
+                      t.auto,
+                      settings.autostart_known === false ? t.unknown : t.autoHelp,
+                      settings.autostart,
+                      (value) => void toggleAuto(value),
+                      // An unconfirmed OS state must not read as a definite "off" switch,
+                      // but the switch stays usable so the user can set it explicitly.
+                      false,
+                      settings.autostart_known === false,
+                    )}
+                  </SettingsSection>
                   {!!settings.warnings?.length && (
                     <p className="system-warning" role="alert">
                       {[
@@ -970,7 +1686,9 @@ export default function App() {
                                       ? t.settingsUnreadable
                                       : warning.startsWith("TRAY_MENU_STALE")
                                         ? t.settingsTraySync
-                                        : t.warning,
+                                        : warning.startsWith("AGENT_UNAVAILABLE")
+                                          ? t.agentWarning
+                                          : t.warning,
                           ),
                         ),
                       ].join(" ")}
@@ -987,7 +1705,7 @@ export default function App() {
                     <button
                       disabled={uiBusy}
                       onClick={async () => {
-                        if (!settingsDirty || (await confirm(t.dirtyPrompt)))
+                        if ((!settingsDirty && !syncSettingsDirty) || (await confirm(t.dirtyPrompt)))
                           await loadSettings(true);
                       }}
                     >
@@ -1019,6 +1737,14 @@ export default function App() {
                     )}
                   </div>
                 </section>
+                </div>
+                <div
+                  id="settings-panel-about"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-about"
+                  className="tab-panel"
+                  hidden={settingsTab !== "about"}
+                >
                 <section className="card metadata" aria-label={t.version}>
                   <div>
                     <small>{t.version}</small>
@@ -1035,6 +1761,13 @@ export default function App() {
                     </strong>
                   </div>
                 </section>
+                </div>
+                {(["target", "automation"] as const).map((tab) => (
+                  <div key={tab} id={`settings-panel-${tab}`} role="tabpanel"
+                    aria-labelledby={`settings-tab-${tab}`} className="tab-panel" hidden={settingsTab !== tab}>
+                    {syncPanel(tab)}
+                  </div>
+                ))}
               </>
             )}
           </>

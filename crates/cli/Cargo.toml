@@ -4,14 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+default-run = "ai-config"
 
 [[bin]]
 name = "ai-config"
 path = "src/main.rs"
 
+[[bin]]
+name = "ai-config-manager-cli"
+path = "src/manager.rs"
+
 [dependencies]
 ai-config-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
+zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

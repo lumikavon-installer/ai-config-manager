@@ -3,5 +3,5 @@
   "identifier": "main",
   "description": "Only local main-window events and narrowly scoped application commands. No shell, filesystem or remote IPC.",
   "windows": ["main"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-config-read", "allow-config-save", "allow-config-check", "allow-history-list", "allow-settings-read", "allow-settings-save", "allow-autostart-set", "allow-window-hide", "allow-window-control"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-config-read", "allow-config-save", "allow-config-check", "allow-config-test", "allow-endpoint-read", "allow-endpoint-save", "allow-endpoint-check", "allow-endpoint-test", "allow-history-list", "allow-settings-read", "allow-settings-save", "allow-sync-read", "allow-sync-save-settings", "allow-sync-add-item", "allow-sync-remove-item", "allow-sync-set-item-enabled", "allow-sync-run", "allow-sync-run-application", "allow-sync-set-application-auto-sync", "allow-sync-test-repository", "allow-sync-create-repository", "allow-sync-register-application", "allow-sync-save-policy", "allow-sync-history", "allow-sync-cleanup", "allow-autostart-set", "allow-window-hide", "allow-window-control"]
 }

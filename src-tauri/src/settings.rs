@@ -15,13 +15,18 @@ pub struct Settings {
     pub silent_start: bool,
     pub close_to_tray: bool,
     pub language: String,
+    /// One-time marker for the install-default autostart registration. A user
+    /// can still disable autostart afterwards without it being re-enabled.
+    #[serde(default)]
+    pub autostart_default_applied: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            silent_start: false,
+            silent_start: true,
             close_to_tray: true,
             language: "zh".into(),
+            autostart_default_applied: false,
         }
     }
 }
@@ -179,10 +184,13 @@ mod tests {
         let path = dir.path().join("settings.json");
         let mut state = SettingsState::load(path.clone());
         assert_eq!(state.settings.language, "zh");
+        assert!(state.settings.silent_start);
+        assert!(!state.settings.autostart_default_applied);
         let chosen = Settings {
             language: "en".into(),
             silent_start: true,
             close_to_tray: false,
+            ..Settings::default()
         };
         state.save(chosen.clone()).unwrap();
         assert_eq!(SettingsState::load(path).settings, chosen);
@@ -251,6 +259,7 @@ mod tests {
             language: "en".into(),
             silent_start: true,
             close_to_tray: false,
+            ..Settings::default()
         };
         let outcome = state
             .save_with_sync(chosen.clone(), |_| {

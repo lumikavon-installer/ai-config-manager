@@ -58,6 +58,16 @@ pub(super) fn read_bounded(p: &Path) -> Result<Option<Vec<u8>>> {
 pub(super) fn sync_parent(p: &Path) -> Result<()> {
     platform::sync_parent(p)
 }
+pub(super) fn set_modified(path: &Path, modified: std::time::SystemTime) -> Result<()> {
+    safe_file(path)?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|_| err("IO"))?;
+    file.set_modified(modified)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| err("IO"))
+}
 pub(super) fn write_atomic(p: &Path, data: &[u8]) -> Result<()> {
     safe_file(p)?;
     let mut rand = [0u8; 16];

@@ -50,7 +50,7 @@ export default function TitleBar({ language, onClose, onError }: {
           if (event.button === 0 && event.detail === 1) control("start_dragging");
         }}
         onDoubleClick={() => control("toggle_maximize")}>
-        <span aria-hidden="true" className="titlebar-mark">◈</span>
+        <span aria-hidden="true" className="titlebar-mark">A</span>
         <span>{t.brand}</span>
       </div>
       <div className="window-controls" role="group" aria-label={t.windowControls}>

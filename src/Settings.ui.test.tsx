@@ -201,6 +201,49 @@ describe("Settings page inventory", () => {
     expect(screen.getByText("可用")).toBeInTheDocument();
   });
 
+  it("switches settings panels with accessible tabs and arrow keys", async () => {
+    await ready();
+    const general = screen.getByRole("tab", { name: "常规" });
+    const about = screen.getByRole("tab", { name: "关于" });
+    expect(general).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel", { name: "常规" })).toBeVisible();
+    expect(document.getElementById("settings-panel-target")).not.toBeVisible();
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["常规", "同步目标", "自动化", "关于"]);
+
+    await userEvent.click(about);
+    expect(about).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel", { name: "关于" })).toBeVisible();
+    expect(screen.getByText("版本")).toBeVisible();
+    expect(document.getElementById("settings-panel-general")).not.toBeVisible();
+
+    about.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(general).toHaveAttribute("aria-selected", "true");
+    expect(general).toHaveFocus();
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(about).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("collapses and expands settings groups without unmounting controls or losing draft edits", async () => {
+    await ready();
+    const groups = [...document.querySelectorAll("details.settings-group")] as HTMLDetailsElement[];
+    expect(groups.length).toBeGreaterThanOrEqual(2);
+    expect(groups.every((group) => group.open)).toBe(true);
+
+    await userEvent.click(screen.getByRole("switch", { name: /静默启动/ }));
+    expect(screen.getByRole("switch", { name: /静默启动/ })).toBeChecked();
+
+    const summary = groups[0].querySelector("summary")!;
+    await userEvent.click(summary);
+    expect(groups[0].open).toBe(false);
+    expect(document.getElementById("language")).toBeInTheDocument();
+
+    await userEvent.click(summary);
+    expect(groups[0].open).toBe(true);
+    expect(screen.getByRole("switch", { name: /静默启动/ })).toBeChecked();
+    expect(screen.getByRole("button", { name: zh.cancel })).toBeEnabled();
+  });
+
   it("renders the English shell and settings copy from the saved language", async () => {
     actual.language = "en";
     await ready("en");

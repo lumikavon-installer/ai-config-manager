@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-test-repository"
+description = "Enables the sync_test_repository command without any pre-configured scope."
+commands.allow = ["sync_test_repository"]
+
+[[permission]]
+identifier = "deny-sync-test-repository"
+description = "Denies the sync_test_repository command without any pre-configured scope."
+commands.deny = ["sync_test_repository"]

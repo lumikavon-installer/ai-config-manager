@@ -10,7 +10,18 @@ pub(super) fn parse(text: &str) -> Result<Value> {
         return Err(err("INVALID_CONFIG"));
     }
     check_value(&value, 0)?;
-    let _ = openai(&value)?;
+    for kind in EndpointKind::ALL {
+        if let Some(block) = endpoint(&value, kind)? {
+            for name in ["base_url", "model", "api_key"] {
+                if block
+                    .get(Value::String(name.into()))
+                    .is_some_and(|value| !value.is_string())
+                {
+                    return Err(err("INVALID_CONFIG"));
+                }
+            }
+        }
+    }
     Ok(value)
 }
 pub(super) fn check_value(v: &Value, depth: usize) -> Result<()> {
@@ -40,39 +51,45 @@ pub(super) fn check_value(v: &Value, depth: usize) -> Result<()> {
         _ => Ok(()),
     }
 }
-pub(super) fn openai(doc: &Value) -> Result<Option<&Mapping>> {
+pub(super) fn endpoint(doc: &Value, kind: EndpointKind) -> Result<Option<&Mapping>> {
     let root = doc.as_mapping().ok_or_else(|| err("INVALID_CONFIG"))?;
     let Some(ai) = root.get(Value::String("ai".into())) else {
         return Ok(None);
     };
     let ai = ai.as_mapping().ok_or_else(|| err("INVALID_CONFIG"))?;
-    let Some(o) = ai.get(Value::String("openai".into())) else {
+    let Some(block) = ai.get(Value::String(kind.key().into())) else {
         return Ok(None);
     };
-    Ok(Some(o.as_mapping().ok_or_else(|| err("INVALID_CONFIG"))?))
+    Ok(Some(
+        block.as_mapping().ok_or_else(|| err("INVALID_CONFIG"))?,
+    ))
 }
-pub(super) fn field<'a>(doc: &'a Value, name: &str) -> Result<&'a str> {
-    match openai(doc)?.and_then(|m| m.get(Value::String(name.into()))) {
+pub(super) fn field_in<'a>(doc: &'a Value, kind: EndpointKind, name: &str) -> Result<&'a str> {
+    match endpoint(doc, kind)?.and_then(|m| m.get(Value::String(name.into()))) {
         None => Ok(""),
         Some(Value::String(s)) => Ok(s),
         _ => Err(err("INVALID_CONFIG")),
     }
 }
-pub(super) fn key_text(doc: &Value) -> Result<&str> {
-    field(doc, "api_key")
-}
-pub(super) fn view(doc: &Value, revision: String, exists: bool) -> Result<ConfigView> {
-    let key = key_text(doc)?;
+pub(super) fn view(
+    doc: &Value,
+    kind: EndpointKind,
+    revision: String,
+    exists: bool,
+) -> Result<ConfigView> {
+    let key = field_in(doc, kind, "api_key")?;
     Ok(ConfigView {
         exists,
-        base_url: field(doc, "base_url")?.into(),
-        model: field(doc, "model")?.into(),
+        base_url: field_in(doc, kind, "base_url")?.into(),
+        model: field_in(doc, kind, "model")?.into(),
         key_present: !key.is_empty(),
         encrypted: key.starts_with("ENC("),
         revision,
+        endpoint: kind,
+        configured: endpoint(doc, kind)?.is_some(),
     })
 }
-pub(super) fn validate(url: &str, model: &str, key: &str) -> Result<()> {
+pub(super) fn validate(url: &str, model: &str, key: &str, requires_key: bool) -> Result<()> {
     if url.len() > 8192 {
         return Err(err("INVALID_URL"));
     }
@@ -97,7 +114,8 @@ pub(super) fn validate(url: &str, model: &str, key: &str) -> Result<()> {
     if model.trim().is_empty() || model.len() > 1024 || model.chars().any(char::is_control) {
         return Err(err("INVALID_MODEL"));
     }
-    if key.trim().is_empty()
+    if (requires_key && key.trim().is_empty())
+        || (!key.is_empty() && key.trim().is_empty())
         || key.len() > 65536
         || key.chars().any(char::is_control)
         || key.starts_with("ENC(")
@@ -106,28 +124,30 @@ pub(super) fn validate(url: &str, model: &str, key: &str) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn set_fields(doc: &mut Value, url: &str, model: &str, key: &str) -> Result<()> {
+pub(super) fn set_fields(
+    doc: &mut Value,
+    kind: EndpointKind,
+    url: &str,
+    model: &str,
+    key: &str,
+) -> Result<()> {
     let root = doc.as_mapping_mut().ok_or_else(|| err("INVALID_CONFIG"))?;
     let ai = root
         .entry(Value::String("ai".into()))
         .or_insert(Value::Mapping(Mapping::new()))
         .as_mapping_mut()
         .ok_or_else(|| err("INVALID_CONFIG"))?;
-    let o = ai
-        .entry(Value::String("openai".into()))
+    let block = ai
+        .entry(Value::String(kind.key().into()))
         .or_insert(Value::Mapping(Mapping::new()))
         .as_mapping_mut()
         .ok_or_else(|| err("INVALID_CONFIG"))?;
     for (k, v) in [("base_url", url), ("model", model), ("api_key", key)] {
-        o.insert(Value::String(k.into()), Value::String(v.into()));
+        block.insert(Value::String(k.into()), Value::String(v.into()));
     }
     Ok(())
 }
-pub(super) fn canonical_hash(doc: &Value, key: &Secret) -> Result<String> {
-    let mut plain = doc.clone();
-    let url = field(doc, "base_url")?;
-    let model = field(doc, "model")?;
-    set_fields(&mut plain, url, model, &key.0)?;
+pub(super) fn canonical_json(doc: &Value) -> Result<serde_json::Value> {
     fn norm(v: &Value) -> Result<serde_json::Value> {
         match v {
             Value::Mapping(m) => {
@@ -148,16 +168,102 @@ pub(super) fn canonical_hash(doc: &Value, key: &Secret) -> Result<String> {
             _ => serde_json::to_value(v).map_err(|_| err("INVALID_CONFIG")),
         }
     }
-    let mut tree = norm(&plain)?;
-    let data = Zeroizing::new(serde_json::to_vec(&tree).map_err(|_| err("INVALID_CONFIG"))?);
-    // The digest is over plaintext, so the JSON tree holds every secret that the
-    // document carries. Wipe those strings (and the serialized bytes above) as soon
-    // as the hash exists instead of leaving them for the allocator to reuse.
-    wipe_json(&mut tree);
-    drop(plain);
-    Ok(hash(&data))
+    norm(doc)
 }
-fn wipe_json(v: &mut serde_json::Value) {
+/// Decrypt every configured endpoint in place. The result is a full plaintext
+/// document and must be wiped after use.
+pub(super) fn decrypt_document(store: &Store, doc: &Value) -> Result<Value> {
+    let mut plain = doc.clone();
+    for kind in EndpointKind::ALL {
+        let key = field_in(doc, kind, "api_key")?;
+        if key.is_empty() {
+            continue;
+        }
+        let secret = store.decrypt(key)?;
+        set_fields(
+            &mut plain,
+            kind,
+            field_in(doc, kind, "base_url")?,
+            field_in(doc, kind, "model")?,
+            &secret.0,
+        )?;
+    }
+    Ok(plain)
+}
+/// Validate every endpoint that is present. A missing block is allowed; a
+/// present block must be complete, and only OpenAI may omit the credential.
+pub(super) fn validate_document(doc: &Value) -> Result<()> {
+    let mut any = false;
+    for kind in EndpointKind::ALL {
+        if endpoint(doc, kind)?.is_none() {
+            continue;
+        }
+        any = true;
+        let key = field_in(doc, kind, "api_key")?;
+        if key.starts_with("ENC(") {
+            return Err(err("INVALID_CONFIG"));
+        }
+        validate(
+            field_in(doc, kind, "base_url")?,
+            field_in(doc, kind, "model")?,
+            key,
+            kind.requires_key(),
+        )?;
+    }
+    if !any {
+        return Err(err("INVALID_CONFIG"));
+    }
+    Ok(())
+}
+/// Re-encrypt each nonempty endpoint credential, or keep the plaintext when
+/// encryption is explicitly disabled.
+pub(super) fn store_document(
+    store: &Store,
+    plain: &Value,
+    encrypt: bool,
+    only: Option<EndpointKind>,
+) -> Result<Value> {
+    let mut stored = plain.clone();
+    for kind in EndpointKind::ALL {
+        if endpoint(plain, kind)?.is_none() {
+            continue;
+        }
+        let key = field_in(plain, kind, "api_key")?;
+        let value = if only.is_some_and(|target| target != kind) {
+            // Untouched blocks keep their existing storage form.
+            key.to_string()
+        } else if key.is_empty() {
+            String::new()
+        } else if key.starts_with("ENC(") {
+            if encrypt {
+                key.to_string()
+            } else {
+                store.decrypt(key)?.0.clone()
+            }
+        } else if encrypt {
+            store.encrypt(&Secret(key.into()))?
+        } else {
+            key.to_string()
+        };
+        let base_url = field_in(plain, kind, "base_url")?.to_string();
+        let model = field_in(plain, kind, "model")?.to_string();
+        set_fields(&mut stored, kind, &base_url, &model, &value)?;
+    }
+    Ok(stored)
+}
+pub(super) fn wipe_yaml(v: &mut Value) {
+    match v {
+        Value::String(s) => s.zeroize(),
+        Value::Sequence(a) => a.iter_mut().for_each(wipe_yaml),
+        Value::Mapping(m) => {
+            for (_, value) in m.iter_mut() {
+                wipe_yaml(value);
+            }
+        }
+        _ => {}
+    }
+}
+pub(super) fn wipe_json(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::String(s) => s.zeroize(),
         serde_json::Value::Array(a) => a.iter_mut().for_each(wipe_json),

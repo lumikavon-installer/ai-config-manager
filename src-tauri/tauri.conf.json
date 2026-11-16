@@ -1,13 +1,41 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI Config Manager",
-  "version": "0.1.1",
+  "productName": "AI配置管理器",
+  "mainBinaryName": "ai-config-manager",
+  "version": "0.2.0",
   "identifier": "dev.aiconfig.manager",
-  "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
+  "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build:cli && npm run build", "frontendDist": "../dist" },
   "app": {
     "withGlobalTauri": false,
-    "windows": [{ "label": "main", "title": "AI Config Manager", "width": 1180, "height": 820, "minWidth": 820, "minHeight": 620, "visible": false, "center": true, "decorations": false }],
+    "windows": [{ "label": "main", "title": "AI配置管理器", "width": 1180, "height": 820, "minWidth": 820, "minHeight": 620, "visible": false, "center": true, "decorations": false }],
     "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'" }
   },
-  "bundle": { "active": true, "targets": "all", "category": "DeveloperTool", "shortDescription": "Secure local AI provider configuration", "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"] }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Secure local AI provider configuration",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "linux": {
+      "deb": { "files": { "/usr/local/bin/ai-config-manager-cli": "../target/release/ai-config-manager-cli" } },
+      "rpm": { "files": { "/usr/local/bin/ai-config-manager-cli": "../target/release/ai-config-manager-cli" } },
+      "appimage": { "files": { "/usr/bin/ai-config-manager-cli": "../target/release/ai-config-manager-cli" } }
+    },
+    "windows": {
+      "wix": {
+        "language": "zh-CN",
+        "upgradeCode": "d808faa7-676c-5d18-9bd5-e8088a2705e3",
+        "fragmentPaths": ["wix/cli.wxs"],
+        "componentRefs": ["AiConfigManagerCli"]
+      },
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "nsis/cli.nsh",
+        "displayLanguageSelector": true,
+        "languages": ["SimpChinese", "English"],
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    }
+  }
 }

@@ -103,6 +103,15 @@ beforeEach(() => {
         if (checkError) throw { code: checkError };
         return undefined;
       }
+      if (command === "config_test") {
+        return {
+          ok: true,
+          status: 200,
+          endpoint: `${disk.base_url}/models`,
+          latency_ms: 12,
+          code: "ok",
+        };
+      }
       if (command === "config_save") {
         const request = args!.request;
         if (saveError) throw { code: saveError };
@@ -164,6 +173,9 @@ describe("config route shell", () => {
     expect(items.map((item) => item.textContent?.trim())).toEqual([
       "⚙配置",
       "↺历史记录",
+      "⇄同步列表",
+      "▦应用注册",
+      "◷同步记录",
       "☷设置",
     ]);
     expect(items[0]).toHaveAttribute("aria-current", "page");
@@ -178,7 +190,7 @@ describe("config route shell", () => {
       "连接你的 AI 服务",
     );
     expect(document.querySelector("header p")).toHaveTextContent(
-      "统一管理本地模型连接，密钥始终留在你的设备上。",
+      "统一管理对话、向量、决策与语音模型接口，按需加密备份配置。",
     );
     expect(statusLine()).toHaveTextContent(/^$/);
     expect(statusLine()).toHaveAttribute("role", "status");
@@ -187,12 +199,12 @@ describe("config route shell", () => {
 
   it("renders the card heading, badge and security note", async () => {
     await ready();
-    expect(document.querySelector(".card-top h2")).toHaveTextContent(/^配置$/);
+    expect(document.querySelector(".card-top h2")).toHaveTextContent(/^配置/);
     expect(badge()).toHaveTextContent(/^密钥加密$/);
     expect(badge().className).not.toContain("warning");
     expect(document.querySelector(".note strong")).toHaveTextContent(/^安全提示$/);
     expect(document.querySelector(".note p")).toHaveTextContent(
-      "界面不会显示已存密钥；请勿将配置文件中的敏感内容分享给他人。",
+      "界面不会显示已存密钥；只有点击“测试 AI 连接”时才会把密钥发送到配置的 API 地址。请勿将配置文件中的敏感内容分享给他人。",
     );
   });
 
@@ -246,10 +258,23 @@ describe("config route shell", () => {
       "重新加载",
       "取消更改",
       "验证密钥读取",
+      "测试 AI 连接",
     ]);
     expect(actions[0]).toHaveAttribute("type", "submit");
     expect(actions[2]).toBeDisabled();
     expect(actions[3]).toBeEnabled();
+    expect(actions[4]).toBeEnabled();
+  });
+
+  it("runs an explicit AI connection test and renders the result", async () => {
+    await ready();
+    await userEvent.click(button("测试 AI 连接"));
+    expect(ipc.invoke).toHaveBeenCalledWith("config_test");
+    expect(await screen.findByText(/连接成功（HTTP 200，12 ms）/)).toBeInTheDocument();
+    const probe = document.querySelector(".probe-result");
+    expect(probe).toHaveTextContent("https://app.example/v1/models");
+    expect(probe).toHaveTextContent("HTTP 200");
+    expect(probe).toHaveTextContent("12 ms");
   });
 
   it("renders English copy for the whole config route when settings say en", async () => {
@@ -263,10 +288,10 @@ describe("config route shell", () => {
       /^Configuration$/,
     );
     expect(document.querySelector("header p")).toHaveTextContent(
-      "Manage local model connections. Your credentials stay on your device.",
+      "Manage chat, embedding, decision and speech endpoints, and back up encrypted configurations on demand.",
     );
     expect(document.querySelector(".card-top h2")).toHaveTextContent(
-      /^Configuration$/,
+      /^Configuration · /,
     );
     expect(badge()).toHaveTextContent(/^Key encrypted$/);
     expect(screen.getByLabelText("API base URL")).toHaveValue(saved.base_url);
@@ -288,10 +313,11 @@ describe("config route shell", () => {
       "Reload",
       "Discard changes",
       "Verify key access",
+      "Test AI connection",
     ]);
     expect(within(screen.getByRole("navigation")).getAllByRole("button").map(
       (item) => item.textContent?.trim(),
-    )).toEqual(["⚙Configuration", "↺History", "☷Settings"]);
+    )).toEqual(["⚙Configuration", "↺History", "⇄Sync list", "▦Applications", "◷Sync records", "☷Settings"]);
     expect(document.querySelector(".note strong")).toHaveTextContent(
       /^Security note$/,
     );

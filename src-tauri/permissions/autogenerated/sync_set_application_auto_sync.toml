@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-set-application-auto-sync"
+description = "Enables the sync_set_application_auto_sync command without any pre-configured scope."
+commands.allow = ["sync_set_application_auto_sync"]
+
+[[permission]]
+identifier = "deny-sync-set-application-auto-sync"
+description = "Denies the sync_set_application_auto_sync command without any pre-configured scope."
+commands.deny = ["sync_set_application_auto_sync"]

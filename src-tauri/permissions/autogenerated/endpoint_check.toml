@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-endpoint-check"
+description = "Enables the endpoint_check command without any pre-configured scope."
+commands.allow = ["endpoint_check"]
+
+[[permission]]
+identifier = "deny-endpoint-check"
+description = "Denies the endpoint_check command without any pre-configured scope."
+commands.deny = ["endpoint_check"]

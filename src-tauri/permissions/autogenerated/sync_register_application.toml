@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-register-application"
+description = "Enables the sync_register_application command without any pre-configured scope."
+commands.allow = ["sync_register_application"]
+
+[[permission]]
+identifier = "deny-sync-register-application"
+description = "Denies the sync_register_application command without any pre-configured scope."
+commands.deny = ["sync_register_application"]

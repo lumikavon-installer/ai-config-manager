@@ -8,15 +8,23 @@ import type { ConfigView } from "./types";
 const ipc = vi.hoisted(() => ({
   invoke: vi.fn(),
   navigate: undefined as undefined | ((event: { payload: string }) => void),
+  configChanged: undefined as undefined | ((event: { payload: string }) => void),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: ipc.invoke,
   isTauri: () => true,
 }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (_name, callback) => {
-    ipc.navigate = callback;
-    return () => { if (ipc.navigate === callback) ipc.navigate = undefined; };
+  listen: vi.fn(async (name, callback) => {
+    if (name === "navigate") {
+      ipc.navigate = callback;
+      return () => { if (ipc.navigate === callback) ipc.navigate = undefined; };
+    }
+    if (name === "config-changed") {
+      ipc.configChanged = callback;
+      return () => { if (ipc.configChanged === callback) ipc.configChanged = undefined; };
+    }
+    return () => {};
   }),
 }));
 const initial: ConfigView = {
@@ -47,6 +55,7 @@ beforeEach(() => {
   readError = saveError = checkError = undefined;
   ipc.invoke.mockReset();
   ipc.navigate = undefined;
+  ipc.configChanged = undefined;
   ipc.invoke.mockImplementation(async (command: string, args?: {
     request: { base_url: string; model: string; api_key: string | null; encrypt: boolean; expected_revision: string };
   }) => {
@@ -136,6 +145,27 @@ describe("config independent behavior review", () => {
     await waitFor(() => expect(reads()).toHaveLength(2));
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("连接你的 AI 服务");
     expect(model()).toHaveValue(initial.model);
+  });
+
+  it("reloads a clean editor when the local agent commits a change", async () => {
+    await ready();
+    disk = { ...disk, model: "agent-model", revision: "revision-agent" };
+    act(() => ipc.configChanged?.({ payload: "revision-agent" }));
+    await waitFor(() => expect(model()).toHaveValue("agent-model"));
+    expect(screen.getByText(/配置已由本地代理更新/)).toBeInTheDocument();
+  });
+
+  it("marks a dirty editor stale instead of overwriting it after an agent change", async () => {
+    await ready();
+    await changeModel("draft-model");
+    disk = { ...disk, model: "agent-model", revision: "revision-agent" };
+    act(() => ipc.configChanged?.({ payload: "revision-agent" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/本地代理/),
+    );
+    expect(model()).toHaveValue("draft-model");
+    expect(button("保存配置")).toBeDisabled();
+    expect(reads().length).toBeGreaterThanOrEqual(2);
   });
 
   it("uses the native missing revision for first save and defaults encryption on", async () => {

@@ -1,11 +1,12 @@
 {
   "name": "ai-config-manager",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "build:cli": "cargo build --locked --release -p ai-config-cli --bin ai-config-manager-cli",
     "test": "vitest run",
     "tauri": "tauri"
   },

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-endpoint-save"
+description = "Enables the endpoint_save command without any pre-configured scope."
+commands.allow = ["endpoint_save"]
+
+[[permission]]
+identifier = "deny-endpoint-save"
+description = "Denies the endpoint_save command without any pre-configured scope."
+commands.deny = ["endpoint_save"]
